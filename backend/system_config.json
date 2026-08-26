@@ -1,0 +1,58 @@
+{
+  "mode": null,
+  "use_gpu": true,
+  "debug_mode": false,
+  "log_file": "logs/detection_log.txt",
+  "max_concurrent_threads": 4,
+  "camera": {
+    "camera_id": 0,
+    "fps": 30,
+    "resize_scale": 0.75,
+    "frame_buffer_size": 5,
+    "skip_frames": 2
+  },
+  "object_detection": {
+    "model_path": "weights/yolo11n.pt",
+    "conf_threshold": 0.5,
+    "nms_threshold": 0.45,
+    "apply_tracking": true,
+    "apply_filtering": true,
+    "min_box_size": 10,
+    "min_area": 400,
+    "show_confidence": true,
+    "show_tracking_id": false,
+    "stable_only": false
+  },
+  "currency_detection": {
+    "model_path": "weights/best.pt",
+    "use_custom_model": true,
+    "conf_threshold": 0.6,
+    "apply_low_light_enhancement": true,
+    "detection_cooldown": 4.0,
+    "show_confidence": true
+  },
+  "preprocessing": {
+    "normalize_brightness": true,
+    "enhance_contrast": true,
+    "denoise": true,
+    "sharpen": false,
+    "denoise_strength": 8,
+    "clahe_clip": 2.0,
+    "target_brightness": 100
+  },
+  "voice": {
+    "enabled": true,
+    "rate": 160,
+    "volume": 1.0,
+    "global_cooldown": 1.5,
+    "object_cooldown_duration": 3.0,
+    "profile": "normal"
+  },
+  "spatial": {
+    "left_max": 0.33,
+    "right_min": 0.66,
+    "near_area_ratio": 0.12,
+    "far_area_ratio": 0.03,
+    "path_band_top": 0.45
+  }
+}

@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-multipart
+opencv-python
+opencv-contrib-python
+numpy
+ultralytics
+torch
+torchvision
+pyttsx3
+SpeechRecognition
+pyaudio
+Pillow
+python-dotenv
+groq
