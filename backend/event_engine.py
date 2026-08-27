@@ -82,6 +82,8 @@ class EventEngine:
 
         for event in filtered:
             self._record(event)
+            if event.get("_currency_sig"):
+                self._last_currency_sig = event["_currency_sig"]
 
         return filtered
 
@@ -303,14 +305,20 @@ class EventEngine:
                 )
             )
 
-        if prev.get("position") != position and priority <= PRIORITY_HIGH:
-            events.append(
-                make(
-                    "OBJECT_MOVED",
-                    f"{name.capitalize()} now on your {position}.",
-                    priority,
+        if prev.get("position") != position:
+            # Only announce lateral moves for higher-priority / path-relevant objects
+            if priority <= PRIORITY_HIGH and (
+                position == "center"
+                or prev.get("position") == "center"
+                or kind in ("vehicle", "person", "obstacle", "stairs")
+            ):
+                events.append(
+                    make(
+                        "OBJECT_MOVED",
+                        f"{name.capitalize()} now on your {position}.",
+                        priority,
+                    )
                 )
-            )
 
         return events
 
@@ -369,18 +377,17 @@ class EventEngine:
         sig = summary.get("signature")
         if not sig or sig == self._last_currency_sig:
             return []
-        self._last_currency_sig = sig
         message = summary.get("spoken") or "Currency detected."
-        return [
-            {
-                "type": "CURRENCY_CHANGED",
-                "message": message,
-                "priority": PRIORITY_MEDIUM,
-                "critical": False,
-                "ts": now,
-                "key": f"CURRENCY:{sig}",
-            }
-        ]
+        event = {
+            "type": "CURRENCY_CHANGED",
+            "message": message,
+            "priority": PRIORITY_MEDIUM,
+            "critical": False,
+            "ts": now,
+            "key": f"CURRENCY:{sig}",
+            "_currency_sig": sig,
+        }
+        return [event]
 
     def _allow(self, event: dict, now: float) -> bool:
         key = event.get("key") or event.get("type")
@@ -410,6 +417,14 @@ class EventEngine:
         )
         if len(self.recent_events) > self.max_recent:
             self.recent_events = self.recent_events[-self.max_recent :]
+
+    def get_recent_for_voice(self, limit: int = 5) -> List[str]:
+        """Return recent event messages for 'what just happened' answers."""
+        return [
+            e.get("message", "")
+            for e in reversed(self.recent_events[-limit:])
+            if e.get("message")
+        ]
 
     def reset(self) -> None:
         self._known_tracks.clear()

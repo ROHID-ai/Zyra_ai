@@ -159,9 +159,13 @@ class GroqService:
             "how many",
             "anyone near",
         )
+        if any(h in cmd for h in ("what just happened", "what happened", "recent")):
+            return {"action": "recent_events", "query": utterance}
+        if "read text" in cmd or "read the text" in cmd or cmd == "read":
+            return {"action": "read_text", "query": utterance}
         if any(h in cmd for h in ask_hints) or cmd.endswith("?"):
             return {"action": "ask", "query": utterance}
-        if any(x in cmd for x in ("start vision", "start object", "object mode", "activate")):
+        if any(x in cmd for x in ("start vision", "start object", "object mode", "activate", "start")):
             return {"action": "start_object", "query": ""}
         if any(x in cmd for x in ("currency", "money", "rupee", "check currency", "notes")):
             if "check" in cmd or "currency" in cmd or "money" in cmd or "rupee" in cmd:
@@ -185,6 +189,20 @@ class GroqService:
             if currency and currency.get("spoken"):
                 return currency["spoken"]
             return "I do not currently see any currency notes."
+
+        if any(
+            x in q
+            for x in ("just happened", "what happened", "recent events", "recently")
+        ):
+            recent = live_state.get("recent_events") or []
+            messages = [
+                e.get("message", "")
+                for e in reversed(recent[-5:])
+                if e.get("message")
+            ]
+            if not messages:
+                return "Nothing notable has happened recently."
+            return "Recently: " + ". ".join(messages) + "."
 
         if "path" in q or "blocked" in q or "clear" in q or "ahead" in q and "who" not in q:
             status = path.get("status", "clear") if isinstance(path, dict) else path

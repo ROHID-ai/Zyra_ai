@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+import base64
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,8 +16,9 @@ from typing import Iterator, Literal, Optional
 os.chdir(Path(__file__).resolve().parent)
 
 import cv2
+import numpy as np
 import speech_recognition as sr
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -24,6 +26,7 @@ from pydantic import BaseModel, Field
 from camera import ThreadedCamera
 from config import ConfigManager
 from currency_detection import CurrencyDetector
+from detection_schema import LiveState, detections_for_display
 from event_engine import EventEngine
 from groq_service import GroqService
 from object_detection import ObjectDetector
@@ -31,6 +34,7 @@ from preprocessing import FramePreprocessor
 from safety_engine import SafetyEngine
 from spatial_analyzer import SpatialAnalyzer
 from voice_engine import VoiceEngine
+import zyra_log
 
 DetectionMode = Optional[Literal["object", "currency"]]
 
@@ -138,26 +142,40 @@ class VisionService:
         self.safety = SafetyEngine()
         self.events = EventEngine()
         self.groq = GroqService()
+        self.live = LiveState()
         self.current_mode: DetectionMode = None
         self._voice_thread: Optional[threading.Thread] = None
         self._voice_running = False
         self._ready = False
         self._init_error: Optional[str] = None
         self._state_lock = threading.Lock()
-        self.last_detections: list[dict] = []
-        self.live_objects: list[dict] = []
-        self.live_path: dict = {"status": "clear"}
-        self.live_danger: str = "low"
-        self.live_hazard: Optional[dict] = None
-        self.currency_summary: dict = {
-            "currency": [],
-            "total": 0,
-            "signature": "",
-            "spoken": "",
-        }
         self.last_response: str = ""
         self.core_state: str = "idle"  # idle|listening|vision|thinking|warning|responding|offline
         self._frame_index = 0
+
+    @property
+    def last_detections(self) -> list[dict]:
+        return self.live.recent_detections
+
+    @property
+    def live_objects(self) -> list[dict]:
+        return self.live.objects
+
+    @property
+    def live_path(self) -> dict:
+        return self.live.path
+
+    @property
+    def live_danger(self) -> str:
+        return self.live.danger
+
+    @property
+    def live_hazard(self) -> Optional[dict]:
+        return self.live.hazard
+
+    @property
+    def currency_summary(self) -> dict:
+        return self.live.currency
 
     @property
     def is_ready(self) -> bool:
@@ -166,8 +184,16 @@ class VisionService:
     def initialize(self) -> None:
         try:
             config = self.config_manager.get_config()
+            zyra_log.set_debug(bool(config.debug_mode))
 
             print("\n[Vision System] Initializing components...")
+
+            obj_path = config.object_detection.model_path
+            cur_path = config.currency_detection.model_path
+            if not os.path.exists(obj_path):
+                raise FileNotFoundError(f"Object model not found: {obj_path}")
+            if config.currency_detection.use_custom_model and not os.path.exists(cur_path):
+                zyra_log.log("config", f"Currency model missing at {cur_path}; fallback may apply")
 
             spatial_cfg = config.spatial
             self.spatial.configure(
@@ -241,13 +267,9 @@ class VisionService:
         self.spatial.clear()
 
         with self._state_lock:
-            self.live_objects = []
-            self.live_path = {"status": "clear"}
-            self.live_danger = "low"
-            self.live_hazard = None
-            self.last_detections = []
+            self.live.reset_scene(keep_mode=False)
             if mode != "currency":
-                self.currency_summary = {
+                self.live.currency = {
                     "currency": [],
                     "total": 0,
                     "signature": "",
@@ -280,26 +302,32 @@ class VisionService:
 
     def get_live_state(self) -> dict:
         with self._state_lock:
-            return {
-                "mode": self.current_mode,
-                "objects": list(self.live_objects),
-                "path": dict(self.live_path) if isinstance(self.live_path, dict) else self.live_path,
-                "danger": self.live_danger,
-                "hazard": self.live_hazard,
-                "currency": dict(self.currency_summary),
-                "last_response": self.last_response,
-            }
+            state = self.live.to_dict()
+            state["last_response"] = self.last_response
+            state["recent_events"] = list(self.events.recent_events[-20:])
+            return state
 
     def ask(self, question: str) -> str:
         """Answer from CURRENT live detection state — no frame capture."""
         self.core_state = "thinking"
-        live = self.get_live_state()
-        answer = self.groq.answer_question(question, live)
+        try:
+            live = self.get_live_state()
+            answer = self.groq.answer_question(question, live)
+        except Exception as exc:
+            zyra_log.log("groq", f"Ask failed: {exc}")
+            answer = "I could not process that question right now."
         self.last_response = answer
+        self.live.last_response = answer
         self.core_state = "responding"
         if self.voice_engine:
             self.voice_engine.announce_priority(answer, object_key="ask_zyra")
         return answer
+
+    def _answer_recent_events(self) -> str:
+        messages = self.events.get_recent_for_voice(limit=5)
+        if not messages:
+            return "Nothing notable has happened recently."
+        return "Recently: " + ". ".join(messages) + "."
 
     def handle_utterance(self, utterance: str) -> str:
         intent = self.groq.classify_intent(utterance)
@@ -315,6 +343,18 @@ class VisionService:
         if action == "stop":
             self.change_mode(None)
             return self.last_response or "Vision stopped."
+        if action == "recent_events":
+            msg = self._answer_recent_events()
+            self.last_response = msg
+            if self.voice_engine:
+                self.voice_engine.announce_priority(msg, object_key="recent_events")
+            return msg
+        if action == "read_text":
+            msg = "Text reading is not available yet. It will be added in a future update."
+            self.last_response = msg
+            if self.voice_engine:
+                self.voice_engine.announce_priority(msg, object_key="read_text")
+            return msg
         if action == "help":
             msg = (
                 "You can say start vision, check currency, stop, "
@@ -366,14 +406,10 @@ class VisionService:
         if not self.voice_engine or not events:
             return
 
-        # Speak only the highest-priority event this tick to avoid spam
         top = events[0]
         message = top.get("message") or ""
         critical = bool(top.get("critical"))
-
-        if not critical and self.groq.enabled and top.get("priority", 9) >= 2:
-            # Non-blocking polish is skipped for latency; keep local wording.
-            pass
+        etype = top.get("type", "EVENT")
 
         spoken = self.voice_engine.announce_event(
             message,
@@ -382,16 +418,28 @@ class VisionService:
         )
         if spoken:
             self.last_response = message
+            self.live.last_response = message
+            tag = "TTS"
             if critical:
                 self.core_state = "warning"
+                zyra_log.log("safety", f"CRITICAL — {message}", throttle_key=etype)
+                zyra_log.log(tag, f"Warning spoken: {message[:60]}")
             else:
                 self.core_state = "responding"
+                zyra_log.log("event", f"{etype}: {message[:60]}", throttle_key=etype)
 
     def _process_object_frame(self, frame, config) -> tuple:
-        detections = self.object_detector.detect(
-            frame,
-            conf_threshold=config.object_detection.conf_threshold,
-        )
+        if not self.object_detector:
+            return frame, []
+        try:
+            detections = self.object_detector.detect(
+                frame,
+                conf_threshold=config.object_detection.conf_threshold,
+            )
+        except Exception as exc:
+            zyra_log.log("detection", f"Inference error: {exc}", throttle_key="infer_err")
+            return frame, []
+
         h, w = frame.shape[:2]
         enriched = self.spatial.enrich(
             detections,
@@ -399,63 +447,28 @@ class VisionService:
             frame_height=h,
             track_history=self.object_detector.track_history,
         )
-        # Prefer stable tracks for announcements; keep all for UI overlay
         stable = [d for d in enriched if d.get("stable")]
         safety = self.safety.analyze(stable or enriched, w, h)
         events = self.events.process_scene(safety)
+        display = detections_for_display(stable or enriched)
 
         with self._state_lock:
-            self.live_objects = [
-                {
-                    "name": o.get("name"),
-                    "class": o.get("class") or o.get("name"),
-                    "position": o.get("position"),
-                    "distance": o.get("distance"),
-                    "motion": o.get("motion"),
-                    "confidence": round(float(o.get("confidence") or 0) * 100),
-                    "tracked_id": o.get("tracked_id"),
-                    "priority": o.get("priority"),
-                    "kind": o.get("kind"),
-                    "in_path": o.get("in_path"),
-                    "stable": o.get("stable"),
-                }
-                for o in safety.get("objects") or []
-            ]
-            self.live_path = safety.get("path") or {"status": "clear"}
-            self.live_danger = safety.get("danger") or "low"
-            hazard = safety.get("hazard")
-            self.live_hazard = (
-                {
-                    "name": hazard.get("name"),
-                    "reason": hazard.get("reason"),
-                    "priority": hazard.get("priority"),
-                    "position": hazard.get("position"),
-                    "distance": hazard.get("distance"),
-                    "motion": hazard.get("motion"),
-                }
-                if hazard
-                else None
+            self.live.update_object_scene(
+                safety,
+                self.current_mode,
+                recent_detections=display,
+                recent_events=self.events.recent_events[-20:],
             )
-            self.last_detections = [
-                {
-                    "label": d.get("name") or d.get("class"),
-                    "confidence": round(float(d.get("confidence") or 0) * 100),
-                    "position": d.get("position"),
-                    "distance": d.get("distance"),
-                    "motion": d.get("motion"),
-                }
-                for d in (stable or enriched)
-            ]
 
-        live = self.get_live_state()
-        self._speak_events(events, live)
+        self._speak_events(events, self.get_live_state())
 
-        if self.live_danger in ("critical", "high"):
-            self.core_state = "warning"
-        elif self.current_mode and not self.live_objects:
-            self.core_state = "thinking"
-        elif self.current_mode:
-            self.core_state = "vision"
+        with self._state_lock:
+            if self.live.danger in ("critical", "high"):
+                self.core_state = "warning"
+            elif self.current_mode and not self.live.objects:
+                self.core_state = "thinking"
+            elif self.current_mode:
+                self.core_state = "vision"
 
         annotated = self.object_detector.draw_detections(
             frame, enriched, show_confidence=True
@@ -463,10 +476,17 @@ class VisionService:
         return annotated, enriched
 
     def _process_currency_frame(self, frame, config) -> tuple:
-        detections = self.currency_detector.detect(
-            frame,
-            conf_threshold=config.currency_detection.conf_threshold,
-        )
+        if not self.currency_detector:
+            return frame, []
+        try:
+            detections = self.currency_detector.detect(
+                frame,
+                conf_threshold=config.currency_detection.conf_threshold,
+            )
+        except Exception as exc:
+            zyra_log.log("detection", f"Currency inference error: {exc}", throttle_key="cur_err")
+            return frame, []
+
         summary = build_currency_summary(detections)
         safety = {
             "objects": [],
@@ -475,20 +495,21 @@ class VisionService:
             "hazard": None,
         }
         events = self.events.process_scene(safety, currency_summary=summary)
+        display = [
+            {
+                "label": f"₹{d['denomination']}",
+                "confidence": round(float(d.get("confidence") or 0) * 100),
+            }
+            for d in detections
+        ]
 
         with self._state_lock:
-            self.currency_summary = summary
-            self.live_objects = []
-            self.live_path = {"status": "clear"}
-            self.live_danger = "low"
-            self.live_hazard = None
-            self.last_detections = [
-                {
-                    "label": f"₹{d['denomination']}",
-                    "confidence": round(float(d.get("confidence") or 0) * 100),
-                }
-                for d in detections
-            ]
+            self.live.update_currency_scene(
+                summary,
+                self.current_mode,
+                recent_detections=display,
+                recent_events=self.events.recent_events[-20:],
+            )
 
         self._speak_events(events, self.get_live_state())
         if self.current_mode:
@@ -498,6 +519,40 @@ class VisionService:
             frame, detections, show_confidence=True
         )
         return annotated, detections
+
+    def process_mobile_frame(self, jpeg_bytes: bytes) -> dict:
+        """Process a JPEG frame from the phone camera through the live pipeline."""
+        if not self._ready or not self.preprocessor:
+            return {"ok": False, "error": "Vision system not ready"}
+
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return {"ok": False, "error": "Could not decode image"}
+
+        config = self.config_manager.get_config()
+        try:
+            frame = self.preprocessor.preprocess_for_detection(
+                frame,
+                self.config_manager.get_preprocessing_config(),
+            )
+            if self.current_mode == "object" and self.object_detector:
+                frame, _ = self._process_object_frame(frame, config)
+            elif self.current_mode == "currency" and self.currency_detector:
+                frame, _ = self._process_currency_frame(frame, config)
+        except Exception as exc:
+            zyra_log.log("mobile", f"Frame error: {exc}", throttle_key="mobile_err")
+            return {"ok": False, "error": str(exc)}
+
+        ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return {"ok": False, "error": "Encode failed"}
+
+        return {
+            "ok": True,
+            "frame_b64": base64.b64encode(buffer.tobytes()).decode("ascii"),
+            "mode": self.current_mode,
+        }
 
     def frame_generator(self) -> Iterator[bytes]:
         while True:
@@ -518,13 +573,18 @@ class VisionService:
             self._frame_index += 1
 
             if self.current_mode == "object" and self.object_detector:
-                frame, _ = self._process_object_frame(frame, config)
+                try:
+                    frame, _ = self._process_object_frame(frame, config)
+                except Exception as exc:
+                    zyra_log.log("pipeline", f"Object frame error: {exc}", throttle_key="obj_frame")
             elif self.current_mode == "currency" and self.currency_detector:
-                frame, _ = self._process_currency_frame(frame, config)
+                try:
+                    frame, _ = self._process_currency_frame(frame, config)
+                except Exception as exc:
+                    zyra_log.log("pipeline", f"Currency frame error: {exc}", throttle_key="cur_frame")
             else:
                 with self._state_lock:
-                    self.last_detections = []
-                    self.live_objects = []
+                    self.live.reset_scene(keep_mode=True)
 
             _, buffer = cv2.imencode(".jpg", frame)
             yield (
@@ -560,15 +620,17 @@ class VisionService:
             "voice_engine_stats": (
                 self.voice_engine.get_stats() if self.voice_engine else {}
             ),
-            "recent_detections": self.last_detections,
+            "recent_detections": live.get("recent_detections") or [],
             # Extended accessibility / live-scene fields
             "objects": live.get("objects") or [],
+            "hazards": live.get("hazards") or [],
             "path": path_status,
             "path_detail": path,
             "hazard": live.get("hazard"),
             "danger": live.get("danger") or "low",
+            "environment": live.get("environment") or "unknown",
             "currency": live.get("currency") or {},
-            "recent_events": list(self.events.recent_events[-10:]),
+            "recent_events": list(self.events.recent_events[-20:]),
             "last_response": self.last_response
             or (self.voice_engine.last_announcement if self.voice_engine else ""),
             "core_state": self.core_state,
@@ -615,6 +677,20 @@ def video_feed() -> StreamingResponse:
         vision.frame_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.post("/mobile-frame")
+async def mobile_frame(file: UploadFile = File(...)) -> JSONResponse:
+    """Accept phone camera JPEG; run YOLO pipeline; return annotated frame."""
+    try:
+        data = await file.read()
+        if len(data) > 8_000_000:
+            return JSONResponse({"ok": False, "error": "Image too large"}, status_code=413)
+        result = vision.process_mobile_frame(data)
+        status_code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=status_code)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 @app.get("/start-object")

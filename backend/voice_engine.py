@@ -30,6 +30,7 @@ class VoiceEngine:
         
         # Queuing system
         self.speech_queue = queue.PriorityQueue()
+        self._queue_lock = threading.Lock()
         self.queue_thread = None
         self.running = False
         
@@ -82,10 +83,29 @@ class VoiceEngine:
             except Exception as e:
                 print(f"[VoiceEngine] Queue processing error: {e}")
     
+    def _drain_non_critical_pending(self) -> None:
+        """Drop queued non-critical speech so urgent warnings are not delayed."""
+        with self._queue_lock:
+            kept: list[tuple] = []
+            while True:
+                try:
+                    item = self.speech_queue.get_nowait()
+                except queue.Empty:
+                    break
+                priority = item[0]
+                if priority <= 0:
+                    kept.append(item)
+            for item in kept:
+                self.speech_queue.put(item)
+
+    def _enqueue(self, priority: int, text: str, profile: str, callback=None) -> None:
+        with self._queue_lock:
+            self.speech_queue.put((priority, (text, profile, callback)))
+
     def _speak_now(self, text, profile='normal'):
         """Actually speak the text (thread-safe)"""
+        local_engine = None
         try:
-            # Use fresh engine instance per thread for stability
             local_engine = pyttsx3.init()
             
             if profile in self.profiles:
@@ -97,14 +117,15 @@ class VoiceEngine:
             local_engine.say(text)
             local_engine.runAndWait()
             self.total_announcements += 1
-            
+
         except Exception as e:
             print(f"[VoiceEngine] Speech error: {e}")
         finally:
-            try:
-                local_engine.stop()
-            except:
-                pass
+            if local_engine is not None:
+                try:
+                    local_engine.stop()
+                except Exception:
+                    pass
     
     def announce(self, text, object_key=None, profile='normal', 
                 priority=5, wait_for_cooldown=True, callback=None):
@@ -136,7 +157,7 @@ class VoiceEngine:
                 return False
         
         # Queue the announcement
-        self.speech_queue.put((priority, (text, profile, callback)))
+        self._enqueue(priority, text, profile, callback)
         self.queued_announcements += 1
         self.last_speech_time = now
         
@@ -156,21 +177,16 @@ class VoiceEngine:
     def announce_critical(self, text, object_key=None, profile='loud', callback=None):
         """
         Safety-critical announcement: highest queue priority, shorter object cooldown.
-        Still queued (non-blocking) so the camera loop never waits on TTS/Groq.
+        Drops pending non-critical queue items so urgent warnings are not delayed.
         """
         now = time.time()
-        # Soft global gate so we don't overlap mid-sentence chaos, but allow urgency
-        if now - self.last_speech_time < 0.35:
-            # Still enqueue ahead of normal traffic
-            self.speech_queue.put((0, (text, profile, callback)))
-            self.queued_announcements += 1
-            return True
+        self._drain_non_critical_pending()
 
         if object_key and now - self.object_cooldowns[object_key] < 1.2:
             self.skipped_announcements += 1
             return False
 
-        self.speech_queue.put((0, (text, profile, callback)))
+        self._enqueue(0, text, profile, callback)
         self.queued_announcements += 1
         self.last_speech_time = now
         if object_key:
