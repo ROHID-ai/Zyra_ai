@@ -81,3 +81,25 @@ export function setCameraScale(scale: number): Promise<{ status: string }> {
     body: JSON.stringify({ scale }),
   });
 }
+
+export function postMobileFrame(
+  blob: Blob,
+): Promise<{ ok: boolean; frame_b64?: string; error?: string; mode?: string | null }> {
+  const form = new FormData();
+  form.append("file", blob, "frame.jpg");
+  return fetch(`${API_URL}/mobile-frame`, {
+    method: "POST",
+    body: form,
+  }).then(async (response) => {
+    const data = (await response.json()) as {
+      ok: boolean;
+      frame_b64?: string;
+      error?: string;
+      mode?: string | null;
+    };
+    if (!response.ok && !data.error) {
+      throw new Error(`mobile-frame failed: ${response.status}`);
+    }
+    return data;
+  });
+}

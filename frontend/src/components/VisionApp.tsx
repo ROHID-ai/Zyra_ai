@@ -15,6 +15,7 @@ import {
   stopDetection,
 } from "@/lib/api";
 import type { DetectionMode, RecentDetection, SystemStatus } from "@/types";
+import { useIsMobileClient } from "@/hooks/useIsMobileClient";
 
 function useSpeech() {
   const speak = useCallback((text: string) => {
@@ -136,6 +137,7 @@ export default function VisionApp() {
   const [askBusy, setAskBusy] = useState(false);
   const { speak } = useSpeech();
   const videoUrl = getVideoFeedUrl();
+  const isMobileClient = useIsMobileClient();
 
   const detections = useMemo(
     () => stats?.recent_detections ?? [],
@@ -309,32 +311,59 @@ export default function VisionApp() {
   const isOnline = backendOnline && backendReady;
   const coreActive = Boolean(mode);
   const isWarning = danger === "critical" || danger === "high" || stats?.core_state === "warning";
+  const lanHost = process.env.NEXT_PUBLIC_LAN_HOST;
+  const lanPort = process.env.NEXT_PUBLIC_LAN_PORT ?? "3000";
+  const mobileUrl = lanHost ? `http://${lanHost}:${lanPort}` : null;
 
   return (
-    <div className="veyra-app">
+    <div className="zyra-app">
       <div className="starfield" aria-hidden />
 
+      {mobileUrl && (
+        <div className="zyra-alert zyra-alert--network">
+          <span className="zyra-network-full">
+            Mobile:{" "}
+            <a href={mobileUrl} className="zyra-network-link">
+              {mobileUrl}
+            </a>
+            {" · "}
+            <a href={`https://${lanHost}:${lanPort}`} className="zyra-network-link">
+              https://{lanHost}:{lanPort}
+            </a>
+            <span className="zyra-network-hint"> (camera needs HTTPS)</span>
+          </span>
+          <span className="zyra-network-compact">
+            Camera needs{" "}
+            <a href={`https://${lanHost}:${lanPort}`} className="zyra-network-link">
+              HTTPS
+            </a>
+            {" · "}
+            allow camera when prompted
+          </span>
+        </div>
+      )}
+
       {backendOnline === false && (
-        <div className="veyra-alert veyra-alert--error">
+        <div className="zyra-alert zyra-alert--error">
           Backend offline — run <code>cd backend && python main.py</code>
         </div>
       )}
       {backendOnline && !backendReady && (
-        <div className="veyra-alert veyra-alert--warn">
+        <div className="zyra-alert zyra-alert--warn">
           Loading vision models and camera…
         </div>
       )}
 
-      <header className="veyra-header">
-        <div className="veyra-brand">
+      <header className="zyra-header">
+        <div className="zyra-brand">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="/logo-za.png?v=2"
             alt="Zyra AI"
-            className="veyra-brand-mark"
+            className="zyra-brand-mark"
           />
-          <p className="veyra-subtitle">
-            <span className={`veyra-dot ${coreActive ? "veyra-dot--on" : ""}`} />
+          <p className="zyra-subtitle">
+            <span className={`zyra-dot ${coreActive ? "zyra-dot--on" : ""}`} />
             CORE {coreActive ? "ACTIVE" : "STANDBY"}
           </p>
         </div>
@@ -343,16 +372,16 @@ export default function VisionApp() {
         <img
           src="/zyra-wordmark.png?v=2"
           alt="Zyra AI — Vision · Intelligence · Action"
-          className="veyra-wordmark"
+          className="zyra-wordmark"
         />
 
-        <div className="veyra-online">
-          <span className={`veyra-dot ${isOnline ? "veyra-dot--on" : ""}`} />
+        <div className="zyra-online">
+          <span className={`zyra-dot ${isOnline ? "zyra-dot--on" : ""}`} />
           {isOnline ? "ONLINE" : "CONNECTING"}
         </div>
       </header>
 
-      <main className="veyra-main">
+      <main className="zyra-main">
         <ResponsePanel
           message={responseMessage}
           warning={warningMessage}
@@ -363,7 +392,7 @@ export default function VisionApp() {
           events={stats?.recent_events}
         />
 
-        <section className="veyra-center">
+        <section className="zyra-center">
           <AiCore
             active={coreActive}
             listening={mode === "object"}
@@ -377,30 +406,30 @@ export default function VisionApp() {
             onDeactivate={() => setDetectionMode(null)}
           />
 
-          <form className="veyra-command" onSubmit={handleCommand}>
-            <span className="veyra-prompt">&gt;</span>
+          <form className="zyra-command" onSubmit={handleCommand}>
+            <span className="zyra-prompt">&gt;</span>
             <input
               type="text"
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               placeholder="What do you see? What's ahead? Where is my phone?"
-              className="veyra-command-input"
+              className="zyra-command-input"
               spellCheck={false}
               aria-label="Ask Zyra"
             />
           </form>
 
-          <div className="veyra-mode-toggles">
+          <div className="zyra-mode-toggles">
             <button
               type="button"
-              className={`veyra-mode-btn ${mode === "object" ? "active" : ""}`}
+              className={`zyra-mode-btn ${mode === "object" ? "active" : ""}`}
               onClick={() => setDetectionMode("object")}
             >
               Vision
             </button>
             <button
               type="button"
-              className={`veyra-mode-btn ${mode === "currency" ? "active" : ""}`}
+              className={`zyra-mode-btn ${mode === "currency" ? "active" : ""}`}
               onClick={() => setDetectionMode("currency")}
             >
               Currency
@@ -413,6 +442,8 @@ export default function VisionApp() {
           summary={visionSummary}
           live={Boolean(mode && backendReady)}
           fps={fps}
+          mobile={isMobileClient}
+          backendReady={backendReady}
         />
       </main>
     </div>

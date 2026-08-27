@@ -62,6 +62,10 @@ npm run dev
 
 UI: **http://localhost:3000**
 
+**Mobile (same Wi‑Fi):** **http://192.168.0.10:3000**
+
+Both backend and frontend must be running on your Mac. Phone and Mac must be on the same network.
+
 ## Real-time pipeline
 
 ```

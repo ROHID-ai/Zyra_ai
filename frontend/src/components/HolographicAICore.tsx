@@ -14,7 +14,7 @@ interface HolographicAICoreProps {
   visionActive?: boolean;
 }
 
-const AI_CORE_GIF = "/ai-core.gif";
+const AI_CORE_GIF = "/ai-core.webp";
 
 /**
  * Accurate Dribbble light-AI core animation (hosted locally).

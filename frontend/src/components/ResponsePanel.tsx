@@ -38,10 +38,10 @@ export default function ResponsePanel({
   const hasCurrency = Boolean(currency?.currency?.length);
 
   return (
-    <aside className="veyra-panel veyra-panel--left">
-      <div className="veyra-panel-header">
-        <span className="veyra-panel-title">ZYRA RESPONSE</span>
-        <span className="veyra-badge">AI</span>
+    <aside className="zyra-panel zyra-panel--left">
+      <div className="zyra-panel-header">
+        <span className="zyra-panel-title">ZYRA RESPONSE</span>
+        <span className="zyra-badge">AI</span>
       </div>
 
       {warning && (
@@ -51,7 +51,7 @@ export default function ResponsePanel({
         </div>
       )}
 
-      <p className="veyra-response-text">{message}</p>
+      <p className="zyra-response-text">{message}</p>
 
       <div className="zyra-meta-block">
         <span className="zyra-meta-label">LIVE SCENE</span>
